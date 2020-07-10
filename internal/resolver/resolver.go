@@ -33,7 +33,7 @@ type Resolver interface {
 	Resolve(sourcePath ast.Path, importPath string) *ResolveResult
 	ResolveAbs(absPath string) *ResolveResult
 	Read(path string) (string, bool)
-	PrettyPath(path string) string
+	PrettyPath(path ast.Path) string
 }
 
 type resolver struct {
@@ -254,19 +254,21 @@ func (r *resolver) Read(path string) (string, bool) {
 	return contents, ok
 }
 
-func (r *resolver) PrettyPath(path string) string {
-	if rel, ok := r.fs.Rel(r.fs.Cwd(), path); ok {
-		path = rel
+func (r *resolver) PrettyPath(path ast.Path) string {
+	if path.IsAbsolute {
+		if rel, ok := r.fs.Rel(r.fs.Cwd(), path.Text); ok {
+			path.Text = rel
+		}
+
+		// These human-readable paths are used in error messages, comments in output
+		// files, source names in source maps, and paths in the metadata JSON file.
+		// These should be platform-independent so our output doesn't depend on which
+		// operating system it was run. Replace Windows backward slashes with standard
+		// forward slashes.
+		path.Text = strings.ReplaceAll(path.Text, "\\", "/")
 	}
 
-	// These human-readable paths are used in error messages, comments in output
-	// files, source names in source maps, and paths in the metadata JSON file.
-	// These should be platform-independent so our output doesn't depend on which
-	// operating system it was run. Replace Windows backward slashes with standard
-	// forward slashes.
-	path = strings.ReplaceAll(path, "\\", "/")
-
-	return path
+	return path.Text
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -752,9 +754,10 @@ func (r *resolver) loadAsIndex(path string, entries map[string]fs.Entry) (string
 
 func (r *resolver) parseJSON(path string, options parser.ParseJSONOptions) (ast.Expr, logging.Source, bool) {
 	if contents, ok := r.fs.ReadFile(path); ok {
+		keyPath := ast.Path{Text: path, IsAbsolute: true}
 		source := logging.Source{
-			KeyPath:    ast.Path{Text: path},
-			PrettyPath: r.PrettyPath(path),
+			KeyPath:    keyPath,
+			PrettyPath: r.PrettyPath(keyPath),
 			Contents:   contents,
 		}
 		result, ok := parser.ParseJSON(r.log, source, options)

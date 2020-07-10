@@ -1951,12 +1951,12 @@ func TestPackageJsonBrowserMapModuleDisabled(t *testing.T) {
 		},
 		expected: map[string]string{
 			"/Users/user/project/out.js": `// disabled:/Users/user/project/node_modules/node-pkg/index.js
-var require_index = __commonJS(() => {
+var require_node_pkg = __commonJS(() => {
 });
 
 // /Users/user/project/node_modules/demo-pkg/index.js
 var require_demo_pkg = __commonJS((exports, module) => {
-  const fn2 = require_index();
+  const fn2 = require_node_pkg();
   module.exports = function() {
     return fn2();
   };
@@ -2643,7 +2643,7 @@ func TestRequireBadExtension(t *testing.T) {
 			IsBundling:    true,
 			AbsOutputFile: "/out.js",
 		},
-		expectedScanLog: `/entry.js: error: File extension not supported: /test
+		expectedScanLog: `/entry.js: error: File could not be loaded: /test
 `,
 	})
 }

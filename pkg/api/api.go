@@ -104,7 +104,8 @@ const (
 type Loader uint8
 
 const (
-	LoaderJS Loader = iota
+	LoaderNone Loader = iota
+	LoaderJS
 	LoaderJSX
 	LoaderTS
 	LoaderTSX
@@ -219,6 +220,7 @@ type BuildOptions struct {
 	ResolveExtensions []string
 
 	EntryPoints []string
+	Plugins     []func(Plugin)
 }
 
 type BuildResult struct {
@@ -274,4 +276,29 @@ type TransformResult struct {
 
 func Transform(input string, options TransformOptions) TransformResult {
 	return transformImpl(input, options)
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Plugin API
+
+type Plugin interface {
+	SetName(name string)
+	AddLoader(options LoaderOptions, callback func(LoaderArgs) (LoaderResult, error))
+}
+
+type LoaderOptions struct {
+	Filter        string
+	MatchInternal bool
+}
+
+type LoaderArgs struct {
+	Path string
+}
+
+type LoaderResult struct {
+	Errors   []Message
+	Warnings []Message
+
+	Contents *string
+	Loader   Loader
 }

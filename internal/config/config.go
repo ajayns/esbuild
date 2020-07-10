@@ -1,7 +1,11 @@
 package config
 
 import (
+	"regexp"
+
+	"github.com/evanw/esbuild/internal/ast"
 	"github.com/evanw/esbuild/internal/compat"
+	"github.com/evanw/esbuild/internal/logging"
 )
 
 type LanguageTarget int8
@@ -123,6 +127,26 @@ type ExternalModules struct {
 	AbsPaths    map[string]bool
 }
 
+type LoaderPlugin struct {
+	Name          string
+	Filter        *regexp.Regexp
+	MatchInternal bool
+	Callback      func(LoaderArgs) LoaderResult
+}
+
+type LoaderArgs struct {
+	Path ast.Path
+}
+
+type LoaderResult struct {
+	Contents *string
+	Loader   Loader
+
+	OriginalPath string
+	Msgs         []logging.Msg
+	LoaderError  error
+}
+
 type Options struct {
 	// true: imports are scanned and bundled along with the file
 	// false: imports are left alone and the file is passed through as-is
@@ -154,6 +178,8 @@ type Options struct {
 	ModuleName        string
 	ExtensionToLoader map[string]Loader
 	OutputFormat      Format
+
+	LoaderPlugins []LoaderPlugin
 
 	// If present, metadata about the bundle is written as JSON here
 	AbsMetadataFile string

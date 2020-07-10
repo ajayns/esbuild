@@ -6,6 +6,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -14,6 +15,8 @@ import (
 	"runtime/debug"
 	"sync"
 
+	"github.com/evanw/esbuild/internal/helpers"
+	"github.com/evanw/esbuild/internal/logging"
 	"github.com/evanw/esbuild/pkg/api"
 	"github.com/evanw/esbuild/pkg/cli"
 )
@@ -142,19 +145,32 @@ func (service *serviceType) handleIncomingMessage(bytes []byte) (result []byte) 
 		}()
 
 		// Handle the request
-		data := p.value.([]interface{})
-		switch data[0] {
+		request := p.value.(map[string]interface{})
+		command := request["command"].(string)
+		switch command {
 		case "build":
-			return service.handleBuildRequest(p.id, data[1].(map[string]interface{}))
+			return service.handleBuildRequest(p.id, request)
 
 		case "transform":
-			return service.handleTransformRequest(p.id, data[1].(map[string]interface{}))
+			return service.handleTransformRequest(p.id, request)
+
+		case "error":
+			// This just exists so that errors during JavaScript API setup get printed
+			// nicely to the console. This matters if the JavaScript API setup code
+			// swallows thrown errors. We still want to be able to see the error.
+			flags := decodeStringArray(request["flags"].([]interface{}))
+			text := request["error"].(string)
+			logging.PrintErrorToStderr(flags, text)
+			return encodePacket(packet{
+				id:    p.id,
+				value: map[string]interface{}{"error": text},
+			})
 
 		default:
 			return encodePacket(packet{
 				id: p.id,
 				value: map[string]interface{}{
-					"error": fmt.Sprintf("Invalid command: %s", p.value),
+					"error": fmt.Sprintf("Invalid command: %s", command),
 				},
 			})
 		}
@@ -184,6 +200,63 @@ func (service *serviceType) handleBuildRequest(id uint32, request map[string]int
 				"error": err.Error(),
 			},
 		})
+	}
+
+	if plugins, ok := request["plugins"]; ok {
+		for i, p := range plugins.([]interface{}) {
+			p := p.(map[string]interface{})
+			func(
+				index int,
+				key int,
+				name string,
+				filter string,
+				matchInternal bool,
+			) {
+				options.Plugins = append(options.Plugins, func(plugin api.Plugin) {
+					plugin.SetName(name)
+					loaderOpts := api.LoaderOptions{
+						Filter:        filter,
+						MatchInternal: matchInternal,
+					}
+					plugin.AddLoader(loaderOpts, func(args api.LoaderArgs) (api.LoaderResult, error) {
+						result := api.LoaderResult{}
+						response := service.sendRequest(map[string]interface{}{
+							"command": "plugin",
+							"key":     key,
+							"index":   index,
+							"path":    args.Path,
+						}).(map[string]interface{})
+						if value, ok := response["error"]; ok {
+							return api.LoaderResult{}, errors.New(value.(string))
+						}
+						if value, ok := response["contents"]; ok {
+							contents := string(value.([]byte))
+							result.Contents = &contents
+						}
+						if value, ok := response["errors"]; ok {
+							result.Errors = decodeMessages(value.([]interface{}))
+						}
+						if value, ok := response["warnings"]; ok {
+							result.Warnings = decodeMessages(value.([]interface{}))
+						}
+						if value, ok := response["loader"]; ok {
+							loader, err := helpers.ParseLoader(value.(string))
+							if err != nil {
+								return api.LoaderResult{}, err
+							}
+							result.Loader = loader
+						}
+						return result, nil
+					})
+				})
+			}(
+				i,
+				p["key"].(int),
+				p["name"].(string),
+				p["filter"].(string),
+				p["matchInternal"].(bool),
+			)
+		}
 	}
 
 	result := api.Build(options)
@@ -281,4 +354,28 @@ func encodeMessages(msgs []api.Message) []interface{} {
 		}
 	}
 	return values
+}
+
+func decodeMessages(values []interface{}) []api.Message {
+	msgs := make([]api.Message, len(values))
+	for i, value := range values {
+		obj := value.(map[string]interface{})
+		msg := api.Message{Text: obj["text"].(string)}
+
+		// Some messages won't have a location
+		loc := obj["location"]
+		if loc != nil {
+			loc := loc.(map[string]interface{})
+			msg.Location = &api.Location{
+				File:     loc["file"].(string),
+				Line:     loc["line"].(int),
+				Column:   loc["column"].(int),
+				Length:   loc["length"].(int),
+				LineText: loc["lineText"].(string),
+			}
+		}
+
+		msgs[i] = msg
+	}
+	return msgs
 }

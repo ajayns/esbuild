@@ -40,6 +40,7 @@ export interface BuildOptions extends CommonOptions {
   write?: boolean;
 
   entryPoints: string[];
+  plugins: ((plugin: Plugin) => void)[];
 }
 
 export interface Message {
@@ -82,6 +83,28 @@ export interface TransformResult {
 export interface TransformFailure extends Error {
   errors: Message[];
   warnings: Message[];
+}
+
+export interface Plugin {
+  setName(name: string): void;
+  addLoader(options: LoaderOptions, callback: (args: LoaderArgs) => (LoaderResult | null | undefined)): void;
+}
+
+export interface LoaderOptions {
+  filter: RegExp;
+  matchInternal?: boolean;
+}
+
+export interface LoaderArgs {
+  path: string;
+}
+
+export interface LoaderResult {
+  errors?: Message[];
+  warnings?: Message[];
+
+  contents?: string | Uint8Array;
+  loader?: Loader;
 }
 
 // This is the type information for the "metafile" JSON format

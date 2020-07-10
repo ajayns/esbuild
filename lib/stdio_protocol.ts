@@ -6,8 +6,14 @@
 import * as types from "./types";
 
 export interface BuildRequest {
+  command: 'build';
   flags: string[];
   write: boolean;
+  plugins?: {
+    name: string;
+    filter: string;
+    matchInternal: boolean;
+  }[];
 }
 
 export interface BuildResponse {
@@ -17,6 +23,7 @@ export interface BuildResponse {
 }
 
 export interface TransformRequest {
+  command: 'transform';
   flags: string[];
   input: string;
 }
@@ -26,6 +33,21 @@ export interface TransformResponse {
   warnings: types.Message[];
   js: string;
   jsSourceMap: string;
+}
+
+export interface PluginRequest {
+  command: 'plugin';
+  key: number;
+  index: number;
+  path: string;
+}
+
+export interface PluginResponse {
+  errors?: types.Message[];
+  warnings?: types.Message[];
+
+  contents?: Uint8Array;
+  loader?: string;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -54,7 +76,7 @@ export function encodePacket(packet: Packet): Uint8Array {
       bb.write8(+value);
     } else if (typeof value === 'number') {
       bb.write8(2);
-      bb.write32(value);
+      bb.write32(value | 0);
     } else if (typeof value === 'string') {
       bb.write8(3);
       bb.write(encodeUTF8(value));

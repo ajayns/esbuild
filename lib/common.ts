@@ -49,6 +49,7 @@ function flagsForBuildOptions(options: types.BuildOptions, isTTY: boolean): stri
   if (options.loader) for (let ext in options.loader) flags.push(`--loader:${ext}=${options.loader[ext]}`);
 
   for (let entryPoint of options.entryPoints) {
+    entryPoint += '';
     if (entryPoint.startsWith('-')) throw new Error(`Invalid entry point: ${entryPoint}`);
     flags.push(entryPoint);
   }
@@ -68,7 +69,8 @@ function flagsForTransformOptions(options: types.TransformOptions, isTTY: boolea
 }
 
 export interface StreamIn {
-  writeToStdin: (data: Uint8Array) => void,
+  writeToStdin: (data: Uint8Array) => void;
+  isSync: boolean;
 }
 
 export interface StreamOut {
@@ -82,11 +84,15 @@ export interface StreamService {
   transform(input: string, options: types.TransformOptions, isTTY: boolean, callback: (err: Error | null, res: types.TransformResult | null) => void): void;
 }
 
-// This can't use any promises because it must work for both sync and async code
+// This can't use any promises in the main execution flow because it must work
+// for both sync and async code. There is an exception for plugin code because
+// that can't work in sync code anyway.
 export function createChannel(options: StreamIn): StreamOut {
-  let callbacks = new Map<number, (error: string | null, response: protocol.Value) => void>();
+  let responseCallbacks = new Map<number, (error: string | null, response: protocol.Value) => void>();
+  let pluginCallbacks = new Map<number, (request: protocol.PluginRequest) => Promise<protocol.PluginResponse>>();
   let isClosed = false;
-  let nextID = 0;
+  let nextRequestID = 0;
+  let nextPluginKey = 0;
 
   // Use a long-lived buffer to store stdout data
   let stdout = new Uint8Array(4096);
@@ -122,16 +128,16 @@ export function createChannel(options: StreamIn): StreamOut {
   let afterClose = () => {
     // When the process is closed, fail all pending requests
     isClosed = true;
-    for (let callback of callbacks.values()) {
+    for (let callback of responseCallbacks.values()) {
       callback('The service was stopped', null);
     }
-    callbacks.clear();
+    responseCallbacks.clear();
   };
 
-  let sendRequest = <Req, Res>(value: [string, Req], callback: (error: string | null, response: Res | null) => void): void => {
+  let sendRequest = <Req, Res>(value: Req, callback: (error: string | null, response: Res | null) => void): void => {
     if (isClosed) return callback('The service is no longer running', null);
-    let id = nextID++;
-    callbacks.set(id, callback as any);
+    let id = nextRequestID++;
+    responseCallbacks.set(id, callback as any);
     options.writeToStdin(protocol.encodePacket({ id, isRequest: true, value: value as any }));
   };
 
@@ -140,17 +146,26 @@ export function createChannel(options: StreamIn): StreamOut {
     options.writeToStdin(protocol.encodePacket({ id, isRequest: false, value }));
   };
 
-  let handleRequest = (id: number, command: string, request: protocol.Value) => {
+  let handleRequest = async (id: number, request: any) => {
     // Catch exceptions in the code below so they get passed to the caller
     try {
+      let command = request.command;
       switch (command) {
+        case 'plugin': {
+          let pluginRequest: protocol.PluginRequest = request;
+          let callback = pluginCallbacks.get(pluginRequest.key);
+          let result: protocol.PluginResponse = await callback!(pluginRequest);
+          sendResponse(id, result as any);
+          break;
+        }
+
         default:
           throw new Error(`Invalid command: ` + command);
       }
     } catch (e) {
       let error = 'Internal error'
       try {
-        error = e + '';
+        error = ((e && e.message) || e) + '';
       } catch {
       }
       sendResponse(id, { error });
@@ -161,15 +176,81 @@ export function createChannel(options: StreamIn): StreamOut {
     let packet = protocol.decodePacket(bytes) as any;
 
     if (packet.isRequest) {
-      handleRequest(packet.id, packet.value[0], packet.value[1]);
+      handleRequest(packet.id, packet.value);
     }
 
     else {
-      let callback = callbacks.get(packet.id)!;
-      callbacks.delete(packet.id);
+      let callback = responseCallbacks.get(packet.id)!;
+      responseCallbacks.delete(packet.id);
       if (packet.value.error) callback(packet.value.error, {});
       else callback(null, packet.value);
     }
+  };
+
+  let handlePlugins = (plugins: ((plugin: types.Plugin) => void)[], request: protocol.BuildRequest) => {
+    if (options.isSync) throw new Error('Cannot use plugins in synchronous API calls');
+
+    interface LoaderPlugin {
+      name: string;
+      filter: string;
+      matchInternal: boolean;
+      callback: (args: types.LoaderArgs) => (types.LoaderResult | null | undefined);
+    }
+
+    let loaderPlugins: LoaderPlugin[] = [];
+
+    for (let callback of plugins) {
+      let name = '';
+      callback({
+        setName(value) {
+          value += '';
+          if (value === '') throw new Error('Name of plugin cannot be empty');
+          if (name !== '') throw new Error('Name of plugin cannot be set multiple times');
+          name = value;
+        },
+        addLoader(options, callback) {
+          if (name === '') throw new Error('Set the plugin name before adding a loader')
+          let filter = options.filter;
+          if (!filter) throw new Error(`[${name}] Loader is missing a filter`);
+          if (!(filter instanceof RegExp)) throw new Error(`[${name}] Loader filter must be a RegExp object`);
+          loaderPlugins.push({
+            name,
+            filter: filter.source,
+            matchInternal: !!options.matchInternal,
+            callback,
+          });
+        },
+      });
+    }
+
+    let pluginKey = nextPluginKey++;
+
+    request.plugins = loaderPlugins.map(loader => ({
+      key: pluginKey,
+      name: loader.name,
+      filter: loader.filter,
+      matchInternal: loader.matchInternal,
+    }));
+
+    pluginCallbacks.set(pluginKey, async (request: protocol.PluginRequest): Promise<protocol.PluginResponse> => {
+      let plugin = loaderPlugins[request.index];
+      let callback = plugin.callback;
+      let result = callback({ path: request.path });
+      let response: protocol.PluginResponse = {};
+
+      if (result != null) {
+        let { contents, loader, errors, warnings } = await result;
+        if (contents instanceof Uint8Array) response.contents = contents;
+        else if (contents != null) response.contents = protocol.encodeUTF8(contents + '');
+        if (loader != null) response.loader = loader + '';
+        if (errors != null) response.errors = sanitizeMessages(errors);
+        if (warnings != null) response.warnings = sanitizeMessages(warnings);
+      }
+
+      return response;
+    });
+
+    return () => pluginCallbacks.delete(pluginKey);
   };
 
   return {
@@ -179,10 +260,12 @@ export function createChannel(options: StreamIn): StreamOut {
     service: {
       build(options, isTTY, callback) {
         let flags = flagsForBuildOptions(options, isTTY);
-        let write = options.write !== false;
-        sendRequest<protocol.BuildRequest, protocol.BuildResponse>(
-          ['build', { flags, write }],
-          (error, response) => {
+        try {
+          let write = options.write !== false;
+          let request: protocol.BuildRequest = { command: 'build', flags, write };
+          let cleanup = 'plugins' in options && handlePlugins(options.plugins, request);
+          sendRequest<protocol.BuildRequest, protocol.BuildResponse>(request, (error, response) => {
+            if (cleanup) cleanup();
             if (error) return callback(new Error(error), null);
             let errors = response!.errors;
             let warnings = response!.warnings;
@@ -190,22 +273,32 @@ export function createChannel(options: StreamIn): StreamOut {
             let result: types.BuildResult = { warnings };
             if (!write) result.outputFiles = response!.outputFiles;
             callback(null, result);
-          },
-        );
+          });
+        } catch (e) {
+          let error = ((e && e.message) || e) + '';
+          sendRequest({ command: 'error', flags, error }, () => {
+            callback(e, null);
+          });
+        }
       },
 
       transform(input, options, isTTY, callback) {
         let flags = flagsForTransformOptions(options, isTTY);
-        sendRequest<protocol.TransformRequest, protocol.TransformResponse>(
-          ['transform', { flags, input }],
-          (error, response) => {
+        try {
+          let request: protocol.TransformRequest = { command: 'transform', flags, input };
+          sendRequest<protocol.TransformRequest, protocol.TransformResponse>(request, (error, response) => {
             if (error) return callback(new Error(error), null);
             let errors = response!.errors;
             let warnings = response!.warnings;
             if (errors.length > 0) return callback(failureErrorWithLog('Transform failed', errors, warnings), null);
             callback(null, { warnings, js: response!.js, jsSourceMap: response!.jsSourceMap });
-          },
-        );
+          });
+        } catch (e) {
+          let error = ((e && e.message) || e) + '';
+          sendRequest({ command: 'error', flags, error }, () => {
+            callback(e, null);
+          });
+        }
       },
     },
   };
@@ -224,4 +317,29 @@ function failureErrorWithLog(text: string, errors: types.Message[], warnings: ty
   error.errors = errors;
   error.warnings = warnings;
   return error;
+}
+
+function sanitizeMessages(messages: types.Message[]): types.Message[] {
+  let messagesClone: types.Message[] = [];
+  for (const message of messages) {
+    let location = message.location;
+    let locationClone: types.Message['location'] = null;
+
+    if (location != null) {
+      let { file, line, column, length, lineText } = location;
+      locationClone = {
+        file: file != null ? file + '' : '',
+        line: +line | 0,
+        column: +column | 0,
+        length: +length | 0,
+        lineText: lineText != null ? lineText + '' : '',
+      };
+    }
+
+    messagesClone.push({
+      text: message.text + '',
+      location: locationClone,
+    });
+  }
+  return messagesClone;
 }

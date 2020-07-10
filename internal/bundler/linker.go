@@ -2805,7 +2805,7 @@ func (c *linkerContext) generateChunk(chunk chunkMeta) (results []OutputFile) {
 			chunkAbsPath := c.fs.Join(c.options.AbsOutputDir, chunk.relPath)
 			importAbsPath := c.fs.Join(c.fs.Dir(chunkAbsPath), record.Path.Text)
 			jMeta.AddString(fmt.Sprintf("\n        {\n          \"path\": %s\n        }",
-				printer.QuoteForJSON(c.res.PrettyPath(importAbsPath))))
+				printer.QuoteForJSON(c.res.PrettyPath(ast.Path{Text: importAbsPath, IsAbsolute: true}))))
 		}
 		if !isFirstMeta {
 			jMeta.AddString("\n      ")

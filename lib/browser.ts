@@ -41,6 +41,7 @@ export let startService = (options: types.BrowserServiceOptions): Promise<types.
       writeToStdin(bytes) {
         worker.postMessage(bytes)
       },
+      isSync: false,
     })
 
     return {

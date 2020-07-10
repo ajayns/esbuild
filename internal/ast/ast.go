@@ -257,6 +257,20 @@ type Path struct {
 	IsAbsolute bool
 }
 
+func NewPath(text string) Path {
+	if strings.HasPrefix(text, "\x00") {
+		return Path{Text: text[1:]}
+	}
+	return Path{Text: text, IsAbsolute: true}
+}
+
+func (path Path) String() string {
+	if path.IsAbsolute {
+		return path.Text
+	}
+	return "\x00" + path.Text
+}
+
 func (a Path) ComesBeforeInSortedOrder(b Path) bool {
 	if !a.IsAbsolute && b.IsAbsolute {
 		return false
